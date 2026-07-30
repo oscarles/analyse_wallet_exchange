@@ -90,6 +90,14 @@ def envoyer_fichier_discord(fichier_source, webhook_url, fichier_etat):
         
         response = requests.post(webhook_url + "?wait=true", data=payload, files=fichiers)
 
+        # Si Discord nous rate-limit, on attend le temps indiqué et on retente une fois
+        if response.status_code == 429:
+            retry_after = response.json().get('retry_after', 1)
+            print(f"⏳ Rate limit Discord, nouvelle tentative dans {retry_after}s...")
+            time.sleep(retry_after)
+            fichier_en_memoire.seek(0)
+            response = requests.post(webhook_url + "?wait=true", data=payload, files=fichiers)
+
         if response.status_code in [200, 201, 204]:
             nouvel_id = response.json()['id']
             print(f"[{time.strftime('%H:%M:%S')}] Envoyé avec succès (ID: {nouvel_id}).")
@@ -115,7 +123,8 @@ def charger_json():
     return []
 
 def sauvegarder_dans_json(nouveau_wallet, nom_wallet):
-    """Ajoute le nouveau wallet détecté au fichier JSON avec la structure demandée."""
+    """Ajoute le nouveau wallet détecté au fichier JSON avec la structure demandée.
+    Retourne True si un nouveau wallet a été ajouté, False si c'était déjà un doublon."""
     data = charger_json()
 
     # On vérifie si l'adresse n'est pas déjà dans la liste pour éviter les doublons
@@ -143,19 +152,23 @@ def sauvegarder_dans_json(nouveau_wallet, nom_wallet):
             json.dump(data, f, indent=2, ensure_ascii=False)
 
         print(f"✅ Sauvegardé dans {NOM_FICHIER_JSON}")
+        return True
     else:
         print(f"ℹ️ Ce wallet est déjà dans le fichier JSON.")
+        return False
 def analyser_transaction(signature, wallet_source):
     """
-    Récupère les détails d'une transaction et identifie exactement 
+    Récupère les détails d'une transaction et identifie exactement
     l'expéditeur ou le destinataire qui a interagi avec le wallet cible.
+    Retourne True si un NOUVEAU wallet a été ajouté au fichier JSON.
     """
+    nouveau_wallet_ajoute = False
     try:
         tx_detail = client.get_transaction(signature, max_supported_transaction_version=0)
-        
+
         if not tx_detail.value or not tx_detail.value.transaction.meta:
-            return
-            
+            return False
+
         timestamp = tx_detail.value.block_time
         if timestamp:
             date_lisible = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')
@@ -180,10 +193,9 @@ def analyser_transaction(signature, wallet_source):
 
         # Si le wallet cible n'est pas dans les comptes modifiés, on ignore
         if wallet_cible_str not in changements:
-            return
+            return False
 
         diff_cible = changements[wallet_cible_str]['diff']
-        transaction_valide_trouvee = False
 
         # Tolérance pour ignorer le paiement des frais de réseau (gas fees)
         SEUIL_FRAIS = -0.005
@@ -208,57 +220,62 @@ def analyser_transaction(signature, wallet_source):
 
                     # On sauvegarde L'EXPÉDITEUR avec le nom associé au wallet cible
                     nom_wallet = NOMS_WALLETS_CIBLES.get(wallet_cible_str, "insider cashino")
-                    sauvegarder_dans_json(data['key'], nom_wallet)
-                    transaction_valide_trouvee = True
+                    if sauvegarder_dans_json(data['key'], nom_wallet):
+                        nouveau_wallet_ajoute = True
                     print("-" * 30)
 
-        # --- ENVOI DISCORD ---
-        if transaction_valide_trouvee:
-            envoyer_fichier_discord(NOM_FICHIER_JSON, WEBHOOK_URL, FICHIER_ETAT)
+        return nouveau_wallet_ajoute
 
     except Exception as e:
         # print(f"Erreur d'analyse : {e}")
-        pass
+        return False
 def main():
     print("🔭 Le Sniper est en marche...")
-    last_signature = None
-    
+
     while True:
+        nouveaux_wallets_ce_cycle = False
+
         for wallet_actuel in BINANCE_WALLETS:
             try:
                 adresse_str = str(wallet_actuel)
                 last_sig = dernieres_signatures[adresse_str]
-                # On demande un peu plus d'historique (limit=50) au cas où il y a eu 
+                # On demande un peu plus d'historique (limit=50) au cas où il y a eu
                 # beaucoup de mouvements pendant la pause de 10s.
                 # Cela ne coûte PAS plus cher si il n'y a rien de nouveau.
                 resp = client.get_signatures_for_address(
                     wallet_actuel,
-                    limit=50, 
+                    limit=50,
                     until=last_sig
                 )
-                
+
                 transactions = resp.value
-                
+
                 if transactions:
                     # On met à jour le curseur pour la prochaine boucle
                     dernieres_signatures[adresse_str] = transactions[0].signature
-                    
+
                     # On parcourt les transactions de la plus ANCIENNE à la plus RÉCENTE
                     # (reversed) pour garder l'ordre chronologique logique
                     for tx in reversed(transactions):
-                        
+
                         # --- OPTIMISATION CRUCIALE ---
                         # Si la transaction a une erreur (failed), on l'ignore GRATUITEMENT
                         if tx.err is not None:
                             continue
                         # -----------------------------
 
-                        analyser_transaction(tx.signature, wallet_actuel)
+                        if analyser_transaction(tx.signature, wallet_actuel):
+                            nouveaux_wallets_ce_cycle = True
 
-                
+
             except Exception as e:
                 print(f"⚠️ Erreur sur {str(wallet_actuel)[:5]}... : {e}")
                 time.sleep(2)
+
+        # Un seul envoi Discord par cycle, même si plusieurs wallets ont été détectés
+        if nouveaux_wallets_ce_cycle:
+            envoyer_fichier_discord(NOM_FICHIER_JSON, WEBHOOK_URL, FICHIER_ETAT)
+
         # OPTIMISATION 2 : On dort 10 secondes au lieu de 1.
         # Grâce au paramètre `until=last_sig`, on récupérera tout ce qui s'est passé
         # pendant ces 10 secondes au prochain tour. Zéro perte de données.
