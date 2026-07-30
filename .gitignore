@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+webhook_state.json
+resultats_abdoul.json
