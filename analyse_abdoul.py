@@ -267,6 +267,10 @@ def main():
                         if analyser_transaction(tx.signature, wallet_actuel):
                             nouveaux_wallets_ce_cycle = True
 
+                        # Petite pause entre chaque appel RPC pour éviter de rate-limit Helius
+                        # si beaucoup de transactions arrivent d'un coup
+                        time.sleep(0.3)
+
 
             except Exception as e:
                 print(f"⚠️ Erreur sur {str(wallet_actuel)[:5]}... : {e}")
@@ -276,10 +280,10 @@ def main():
         if nouveaux_wallets_ce_cycle:
             envoyer_fichier_discord(NOM_FICHIER_JSON, WEBHOOK_URL, FICHIER_ETAT)
 
-        # OPTIMISATION 2 : On dort 10 secondes au lieu de 1.
+        # OPTIMISATION 2 : On dort 30 secondes entre chaque cycle.
         # Grâce au paramètre `until=last_sig`, on récupérera tout ce qui s'est passé
-        # pendant ces 10 secondes au prochain tour. Zéro perte de données.
-        time.sleep(10)
+        # pendant cette pause au prochain tour. Zéro perte de données.
+        time.sleep(30)
 
 if __name__ == "__main__":
     main()
