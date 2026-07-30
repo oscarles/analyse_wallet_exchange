@@ -1,3 +1,5 @@
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
 import time
 from solana.rpc.api import Client
 from solders.pubkey import Pubkey
